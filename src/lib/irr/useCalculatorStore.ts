@@ -2,16 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loadState, saveState, serializeState } from "./storage";
+import { followLatestOverallValue, restoreOverallCutoff } from "./overallCutoff";
 import { STORAGE_KEYS, createDefaultState, type CalculatorMode, type PageState, type RowInput } from "./types";
 
 const AUTOSAVE_DELAY_MS = 250;
 
 export type SaveKind = "loaded" | "auto" | "manual" | "reset" | null;
 
-/**
- * 每個頁面各自擁有一份 state 與 localStorage key。
- * 這個 hook 只會讀寫 STORAGE_KEYS[mode]，不會碰另一頁的資料。
- */
+/** Each page owns its own state and localStorage key. */
 export function useCalculatorStore(mode: CalculatorMode) {
   const key = STORAGE_KEYS[mode];
   const [state, setState] = useState<PageState>(createDefaultState);
@@ -26,18 +24,18 @@ export function useCalculatorStore(mode: CalculatorMode) {
     stateRef.current = state;
   }, [state]);
 
-  // 掛載後讀取本頁自己的資料
   useEffect(() => {
     const result = loadState(key);
-    const initial = result?.state ?? createDefaultState();
-    lastSerialized.current = serializeState(initial);
+    const saved = result?.state ?? createDefaultState();
+    const initial = mode === "overall" ? restoreOverallCutoff(saved) : saved;
+    lastSerialized.current = serializeState(saved);
     stateRef.current = initial;
     loadedRef.current = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setState(initial);
     setStatus({ kind: result ? "loaded" : null, at: result?.savedAt ?? null });
     setLoaded(true);
-  }, [key]);
+  }, [key, mode]);
 
   const writeNow = useCallback(
     (kind: Exclude<SaveKind, "loaded" | null>) => {
@@ -51,7 +49,6 @@ export function useCalculatorStore(mode: CalculatorMode) {
     [key],
   );
 
-  // 自動暫存（防抖）
   useEffect(() => {
     if (!loaded) return;
     if (serializeState(state) === lastSerialized.current) return;
@@ -59,7 +56,6 @@ export function useCalculatorStore(mode: CalculatorMode) {
     return () => window.clearTimeout(timer);
   }, [state, loaded, writeNow]);
 
-  // 離開頁面或重新整理前，立即寫入尚未暫存的變更
   useEffect(() => {
     const flush = () => {
       if (!loadedRef.current) return;
@@ -76,19 +72,26 @@ export function useCalculatorStore(mode: CalculatorMode) {
   }, [key]);
 
   const updateRow = useCallback((year: number, patch: Partial<RowInput>) => {
-    setState((prev) => ({
-      ...prev,
-      rows: prev.rows.map((row, y) => (y === year ? { ...row, ...patch } : row)),
-    }));
-  }, []);
+    setState((prev) => {
+      const next = {
+        ...prev,
+        rows: prev.rows.map((row, y) => (y === year ? { ...row, ...patch } : row)),
+      };
+      const valueChanged = patch.guaranteed !== undefined || patch.nonGuaranteed !== undefined || patch.total !== undefined;
+      return mode === "overall" && valueChanged ? followLatestOverallValue(next) : next;
+    });
+  }, [mode]);
 
   const setCutoffYear = useCallback((cutoffYear: number) => {
     setState((prev) => ({ ...prev, cutoffYear }));
   }, []);
 
   const replaceRows = useCallback((rows: RowInput[]) => {
-    setState((prev) => ({ ...prev, rows }));
-  }, []);
+    setState((prev) => {
+      const next = { ...prev, rows };
+      return mode === "overall" ? followLatestOverallValue(next) : next;
+    });
+  }, [mode]);
 
   const showAllYears = useCallback(() => {
     setState((prev) => ({ ...prev, rows: prev.rows.map((r) => (r.hidden ? { ...r, hidden: false } : r)) }));
